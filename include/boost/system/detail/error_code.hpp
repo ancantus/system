@@ -63,22 +63,17 @@ private:
 
 private:
 
-    struct data
-    {
-        int val_;
-        const error_category * cat_;
-    };
-
+    int val_;
     union
     {
-        data d1_;
-        unsigned char d2_[ sizeof(std::error_code) ];
+        error_category const* cat_;
+        std::error_category const* std_cat_;
     };
 
-    // 0: default constructed, d1_ value initialized
-    // 1: holds std::error_code in d2_
-    // 2: holds error code in d1_, failed == false
-    // 3: holds error code in d1_, failed == true
+    // 0: default constructed, cat_ value initialized
+    // 1: holds std::error_category in cat_ 
+    // 2: holds error code in cat_, failed == false
+    // 3: holds error code in cat_, failed == true
     // >3: pointer to source_location, failed_ in lsb
     boost::uintptr_t lc_flags_;
 
@@ -100,7 +95,7 @@ private:
         }
         else
         {
-            return d1_.cat_->name();
+            return cat_->name();
         }
     }
 
@@ -109,35 +104,31 @@ public:
     // constructors:
 
     constexpr error_code() noexcept:
-        d1_(), lc_flags_( 0 )
+        val_(), cat_(), lc_flags_( 0 )
     {
     }
 
     BOOST_SYSTEM_CONSTEXPR error_code( int val, const error_category & cat ) noexcept:
-        d1_(), lc_flags_( 2 + detail::failed_impl( val, cat ) )
+        val_( val ), cat_( &cat ), lc_flags_( 2 + detail::failed_impl( val, cat ) )
     {
-        d1_.val_ = val;
-        d1_.cat_ = &cat;
     }
 
     error_code( int val, const error_category & cat, source_location const * loc ) noexcept:
-        d1_(), lc_flags_( ( loc? reinterpret_cast<boost::uintptr_t>( loc ): 2 ) | +detail::failed_impl( val, cat ) )
+        val_( val ), cat_( &cat ), lc_flags_( ( loc? reinterpret_cast<boost::uintptr_t>( loc ): 2 ) | +detail::failed_impl( val, cat ) )
     {
-        d1_.val_ = val;
-        d1_.cat_ = &cat;
     }
 
     template<class ErrorCodeEnum> BOOST_SYSTEM_CONSTEXPR error_code( ErrorCodeEnum e,
         typename detail::enable_if<
             is_error_code_enum<ErrorCodeEnum>::value
             || std::is_error_code_enum<ErrorCodeEnum>::value
-        >::type* = 0 ) noexcept: d1_(), lc_flags_( 0 )
+        >::type* = 0 ) noexcept: val_(), lc_flags_( 0 )
     {
         *this = make_error_code( e );
     }
 
     error_code( error_code const& ec, source_location const * loc ) noexcept:
-        d1_(), lc_flags_( 0 )
+        val_(), lc_flags_( 0 )
     {
         *this = ec;
 
@@ -148,7 +139,7 @@ public:
     }
 
     error_code( std::error_code const& ec ) noexcept:
-        d1_(), lc_flags_( 0 )
+        val_(), lc_flags_( 0 )
     {
 #ifndef BOOST_NO_RTTI
 
@@ -160,7 +151,8 @@ public:
 
 #endif
         {
-            ::new( d2_ ) std::error_code( ec );
+            val_ = ec.value();
+            std_cat_ = &ec.category();
             lc_flags_ = 1;
         }
     }
@@ -201,14 +193,12 @@ public:
     {
         if( lc_flags_ != 1 )
         {
-            return d1_.val_;
+            return val_;
         }
         else
         {
-            std::error_code const& ec = *reinterpret_cast<std::error_code const*>( d2_ );
-
-            unsigned cv = static_cast<unsigned>( ec.value() );
-            unsigned ch = static_cast<unsigned>( reinterpret_cast<boost::uintptr_t>( &ec.category() ) % 2097143 ); // 2^21-9, prime
+            unsigned cv = static_cast<unsigned>( val_ );
+            unsigned ch = static_cast<unsigned>( reinterpret_cast<boost::uintptr_t>( std_cat_ ) % 2097143 ); // 2^21-9, prime
 
             return static_cast<int>( cv + 1000 * ch );
         }
@@ -226,7 +216,7 @@ public:
         }
         else
         {
-            return *d1_.cat_;
+            return *cat_;
         }
     }
 
@@ -240,8 +230,7 @@ public:
     {
         if( lc_flags_ == 1 )
         {
-            std::error_code const& ec = *reinterpret_cast<std::error_code const*>( d2_ );
-            return ec.message();
+            return std_cat_->message( val_ );
         }
         else if( lc_flags_ == 0 )
         {
@@ -257,19 +246,17 @@ public:
     {
         if( lc_flags_ == 1 )
         {
-            std::error_code const& ec = *reinterpret_cast<std::error_code const*>( d2_ );
-
 #if !defined(BOOST_NO_EXCEPTIONS)
             try
 #endif
             {
-                detail::snprintf( buffer, len, "%s", ec.message().c_str() );
+                detail::snprintf( buffer, len, "%s", message().c_str() );
                 return buffer;
             }
 #if !defined(BOOST_NO_EXCEPTIONS)
             catch( ... )
             {
-                detail::snprintf( buffer, len, "No message text available for error std:%s:%d", ec.category().name(), ec.value() );
+                detail::snprintf( buffer, len, "No message text available for error std:%s:%d", std_cat_->name(), val_ );
                 return buffer;
             }
 #endif
@@ -290,8 +277,7 @@ public:
         {
             if( lc_flags_ == 1 )
             {
-                std::error_code const& ec = *reinterpret_cast<std::error_code const*>( d2_ );
-                return ec.value() != 0;
+                return val_ != 0;
             }
 
             return true;
@@ -338,7 +324,7 @@ private:
         }
         else
         {
-            return val == d1_.val_ && cat == *d1_.cat_;
+            return val == val_ && cat == *cat_;
         }
     }
 
@@ -356,10 +342,7 @@ public:
 
         if( s1 && s2 )
         {
-            std::error_code const& e1 = *reinterpret_cast<std::error_code const*>( lhs.d2_ );
-            std::error_code const& e2 = *reinterpret_cast<std::error_code const*>( rhs.d2_ );
-
-            return e1 == e2;
+            return lhs.val_ == rhs.val_ && *lhs.std_cat_ == *rhs.std_cat_;
         }
         else
         {
@@ -377,10 +360,7 @@ public:
 
         if( s1 && s2 )
         {
-            std::error_code const& e1 = *reinterpret_cast<std::error_code const*>( lhs.d2_ );
-            std::error_code const& e2 = *reinterpret_cast<std::error_code const*>( rhs.d2_ );
-
-            return e1 < e2;
+            return lhs.std_cat_ < rhs.std_cat_ || (lhs.std_cat_ == rhs.std_cat_ && lhs.val_ < rhs.val_);
         }
         else
         {
@@ -495,7 +475,7 @@ public:
     {
         if( lc_flags_ == 1 )
         {
-            return *reinterpret_cast<std::error_code const*>( d2_ );
+            return std::error_code( val_, *std_cat_ ); 
         }
         else if( lc_flags_ == 0 )
         {
@@ -512,27 +492,13 @@ public:
         }
         else
         {
-            return std::error_code( d1_.val_, *d1_.cat_ );
+            return std::error_code( val_, *cat_ );
         }
     }
 
     operator std::error_code ()
     {
         return const_cast<error_code const&>( *this );
-    }
-
-    template<class T,
-      class E = typename detail::enable_if<detail::is_same<T, std::error_code>::value>::type>
-      operator T& ()
-    {
-        if( lc_flags_ != 1 )
-        {
-            std::error_code e2( *this );
-            ::new( d2_ ) std::error_code( e2 );
-            lc_flags_ = 1;
-        }
-
-        return *reinterpret_cast<std::error_code*>( d2_ );
     }
 
 #if defined(BOOST_SYSTEM_CLANG_6)
@@ -547,11 +513,9 @@ public:
     {
         if( lc_flags_ == 1 )
         {
-            std::error_code const& e2 = *reinterpret_cast<std::error_code const*>( d2_ );
-
             std::string r( "std:" );
-            r += e2.category().name();
-            detail::append_int( r, e2.value() );
+            r += std_cat_->name();
+            detail::append_int( r, val_ );
 
             return r;
         }
@@ -619,7 +583,7 @@ inline std::size_t hash_value( error_code const & ec )
 {
     if( ec.lc_flags_ == 1 )
     {
-        std::error_code const& e2 = *reinterpret_cast<std::error_code const*>( ec.d2_ );
+        std::error_code e2 = static_cast< std::error_code >( ec );
         return std::hash<std::error_code>()( e2 );
     }
 
